@@ -1,28 +1,35 @@
+/// Code generator for Rust target language
 use crate::{
     ast::{AstNode, DataType, Expression, ExpressionContent, Parameter},
     emit::{camel_to_snake_case, emit_element_name, emit_indentation},
 };
 
+/// Emit ast::DataType to Rust type
 fn emit_data_type<W: std::io::Write>(collector: &mut W, data_type: &DataType) -> std::io::Result<()> {
     match data_type {
-        DataType::Integer => collector.write_all(b"isize"),
-        DataType::SimdVector(size) if *size == 1 => collector.write_all(b"f32"),
-        DataType::SimdVector(size) => collector.write_fmt(format_args!("Simd32x{}", *size)),
-        DataType::MultiVector(class) if class.is_scalar() => collector.write_all(b"f32"),
-        DataType::MultiVector(class) => collector.write_fmt(format_args!("{}", class.class_name)),
+        DataType::Integer => collector.write_all(b"isize"),                      // Integers map to isize
+        DataType::SimdVector(size) if *size == 1 => collector.write_all(b"f32"), // Size-1 vectors as f32
+        DataType::SimdVector(size) => collector.write_fmt(format_args!("Simd32x{}", *size)), // Vectors to SIMD
+        DataType::MultiVector(class) if class.is_scalar() => collector.write_all(b"f32"), // Scalar MV as f32
+        DataType::MultiVector(class) => collector.write_fmt(format_args!("{}", class.class_name)), // MV to class
     }
 }
 
+/// Emit ast::Expression to Rust code
 fn emit_expression<W: std::io::Write>(collector: &mut W, expression: &Expression) -> std::io::Result<()> {
     match &expression.content {
         ExpressionContent::None => unreachable!(),
+
+        // Variable reference
         ExpressionContent::Variable(_data_type, name) => {
             collector.write_all(name.bytes().collect::<Vec<_>>().as_slice())?;
         }
+
+        // Method call on an object
         ExpressionContent::InvokeInstanceMethod(_result_class, inner_expression, method_name, _, arguments) => {
             emit_expression(collector, inner_expression)?;
             collector.write_all(b".")?;
-            camel_to_snake_case(collector, method_name)?;
+            camel_to_snake_case(collector, method_name)?; // Convert method name to snake_case
             collector.write_all(b"(")?;
             for (i, (_argument_class, argument)) in arguments.iter().enumerate() {
                 if i > 0 {
@@ -32,9 +39,13 @@ fn emit_expression<W: std::io::Write>(collector: &mut W, expression: &Expression
             }
             collector.write_all(b")")?;
         }
+
+        // Special case for scalar constructor - just pass through the argument
         ExpressionContent::InvokeClassMethod(class, "Constructor", arguments) if class.is_scalar() => {
             emit_expression(collector, &arguments[0].1)?;
         }
+
+        // Object constructor with explicit initialization of group fields
         ExpressionContent::InvokeClassMethod(class, "Constructor", arguments) => {
             collector.write_fmt(format_args!("{} {{ groups: {}Groups {{ ", class.class_name, class.class_name))?;
             for (i, (_argument_class, argument)) in arguments.iter().enumerate() {
@@ -46,6 +57,8 @@ fn emit_expression<W: std::io::Write>(collector: &mut W, expression: &Expression
             }
             collector.write_all(b" } }")?;
         }
+
+        // Static class method call
         ExpressionContent::InvokeClassMethod(class, method_name, arguments) => {
             emit_data_type(collector, &DataType::MultiVector(class))?;
             collector.write_all(b"::")?;
@@ -59,10 +72,14 @@ fn emit_expression<W: std::io::Write>(collector: &mut W, expression: &Expression
             }
             collector.write_all(b")")?;
         }
+
+        // Type conversion using Rust's into() method
         ExpressionContent::Conversion(_source_class, _destination_class, inner_expression) => {
             emit_expression(collector, inner_expression)?;
             collector.write_all(b".into()")?;
         }
+
+        // Conditional expression using Rust's if/else blocks
         ExpressionContent::Select(condition_expression, then_expression, else_expression) => {
             collector.write_all(b"if ")?;
             emit_expression(collector, condition_expression)?;
@@ -72,12 +89,16 @@ fn emit_expression<W: std::io::Write>(collector: &mut W, expression: &Expression
             emit_expression(collector, else_expression)?;
             collector.write_all(b" }")?;
         }
+
+        // Array/vector element access
         ExpressionContent::Access(inner_expression, array_index) => {
             emit_expression(collector, inner_expression)?;
             if !inner_expression.is_scalar() {
                 collector.write_fmt(format_args!(".group{}()", array_index))?;
             }
         }
+
+        // SIMD vector component swizzling
         ExpressionContent::Swizzle(inner_expression, indices) => {
             if expression.size == 1 {
                 emit_expression(collector, inner_expression)?;
@@ -85,7 +106,7 @@ fn emit_expression<W: std::io::Write>(collector: &mut W, expression: &Expression
                     collector.write_fmt(format_args!("[{}]", indices[0]))?;
                 }
             } else {
-                collector.write_all(b"swizzle!(")?;
+                collector.write_all(b"swizzle!(")?; // Using a macro for component reordering
                 emit_expression(collector, inner_expression)?;
                 collector.write_all(b", ")?;
                 for (i, component_index) in indices.iter().enumerate() {
@@ -97,7 +118,10 @@ fn emit_expression<W: std::io::Write>(collector: &mut W, expression: &Expression
                 collector.write_all(b")")?;
             }
         }
+
+        // Complex gathering operation for vectors
         ExpressionContent::Gather(inner_expression, indices) => {
+            // Different handling based on the expression complexity
             if expression.size == 1 && inner_expression.is_scalar() {
                 emit_expression(collector, inner_expression)?;
             } else {
@@ -128,6 +152,8 @@ fn emit_expression<W: std::io::Write>(collector: &mut W, expression: &Expression
                 }
             }
         }
+
+        // Constant literals
         ExpressionContent::Constant(data_type, values) => match data_type {
             DataType::Integer => collector.write_fmt(format_args!("{}", values[0] as f32))?,
             DataType::SimdVector(_size) => {
@@ -153,10 +179,14 @@ fn emit_expression<W: std::io::Write>(collector: &mut W, expression: &Expression
             }
             _ => unreachable!(),
         },
+
+        // Square root function as a method call
         ExpressionContent::SquareRoot(inner_expression) => {
             emit_expression(collector, inner_expression)?;
             collector.write_all(b".sqrt()")?;
         }
+
+        // Binary operations
         ExpressionContent::Add(lhs, rhs)
         | ExpressionContent::Subtract(lhs, rhs)
         | ExpressionContent::Multiply(lhs, rhs)
@@ -183,10 +213,14 @@ fn emit_expression<W: std::io::Write>(collector: &mut W, expression: &Expression
     Ok(())
 }
 
+/// Emit OpAssign (eg AddAssign, MulAssign etc) trait implementations for algebraic operations
 fn emit_assign_trait<W: std::io::Write>(collector: &mut W, result: &Parameter, parameters: &[Parameter]) -> std::io::Result<()> {
+    // Skip if operating on different types
     if result.multi_vector_class() != parameters[0].multi_vector_class() {
         return Ok(());
     }
+
+    // Generate assignment trait implementation (e.g., AddAssign, MulAssign)
     collector.write_fmt(format_args!("impl {}Assign<", result.name))?;
     emit_data_type(collector, &parameters[1].data_type)?;
     collector.write_all(b"> for ")?;
@@ -200,23 +234,35 @@ fn emit_assign_trait<W: std::io::Write>(collector: &mut W, result: &Parameter, p
     collector.write_all(b"(other);\n    }\n}\n\n")
 }
 
+/// Main code generation function for emitting ast nodes to rust code
 pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, indentation: usize) -> std::io::Result<()> {
     match &ast_node {
+        // Empty node
         AstNode::None => {}
+
+        // Code preamble - imports and directives
         AstNode::Preamble => {
             collector.write_all(b"#![allow(clippy::assign_op_pattern)]\n")?;
             collector
                 .write_all(b"use crate::{simd::*, *};\nuse std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};\n\n")?;
         }
+
+        // Class definition - generates struct definition and implementations
         AstNode::ClassDefinition { class } => {
+            // Skip scalar classes
             if class.is_scalar() {
                 return Ok(());
             }
+
+            // Calculate total element count and SIMD widths
             let element_count = class.grouped_basis.iter().fold(0, |a, b| a + b.len());
             let mut simd_widths = Vec::new();
+
+            // Generate inner Groups struct for SIMD vector storage
             emit_indentation(collector, indentation)?;
             collector.write_fmt(format_args!("#[derive(Clone, Copy)]\nstruct {}Groups {{\n", class.class_name))?;
             for (j, group) in class.grouped_basis.iter().enumerate() {
+                // Generate field documentation with basis elements
                 emit_indentation(collector, indentation + 1)?;
                 collector.write_all(b"/// ")?;
                 for (i, element) in group.iter().enumerate() {
@@ -226,17 +272,25 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
                     collector.write_fmt(format_args!("{}", element))?;
                 }
                 collector.write_all(b"\n")?;
+
+                // Generate field with appropriate SIMD type
                 emit_indentation(collector, indentation + 1)?;
                 collector.write_fmt(format_args!("g{}: ", j))?;
                 emit_data_type(collector, &DataType::SimdVector(group.len()))?;
                 collector.write_all(b",\n")?;
+
+                // Track SIMD width for memory layout
                 simd_widths.push(if group.len() == 1 { 1 } else { 4 });
             }
             collector.write_all(b"}\n\n")?;
+
+            // Generate main class as a union of groups and raw elements
             emit_indentation(collector, indentation)?;
             collector.write_fmt(format_args!("#[derive(Clone, Copy)]\npub union {} {{\n", class.class_name))?;
             emit_indentation(collector, indentation + 1)?;
             collector.write_fmt(format_args!("groups: {}Groups,\n", class.class_name))?;
+
+            // Add documentation showing all elements
             emit_indentation(collector, indentation + 1)?;
             collector.write_all(b"/// ")?;
             for (j, group) in class.grouped_basis.iter().enumerate() {
@@ -246,17 +300,24 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
                     }
                     collector.write_fmt(format_args!("{}", element))?;
                 }
+                // Add padding zeros for alignment
                 for _ in group.len()..simd_widths[j] {
                     collector.write_all(b", 0")?;
                 }
             }
             collector.write_all(b"\n")?;
+
+            // Raw elements array field
             emit_indentation(collector, indentation + 1)?;
             collector.write_fmt(format_args!("elements: [f32; {}],\n", simd_widths.iter().fold(0, |a, b| a + b)))?;
             emit_indentation(collector, indentation)?;
             collector.write_all(b"}\n\n")?;
+
+            // Start implementation block
             emit_indentation(collector, indentation)?;
             collector.write_fmt(format_args!("impl {} {{\n", class.class_name))?;
+
+            // Generate constructor
             emit_indentation(collector, indentation + 1)?;
             collector.write_all(b"#[allow(clippy::too_many_arguments)]\n")?;
             emit_indentation(collector, indentation + 1)?;
@@ -273,6 +334,8 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
                 }
             }
             collector.write_all(b") -> Self {\n")?;
+
+            // Constructor body
             emit_indentation(collector, indentation + 2)?;
             collector.write_all(b"Self { elements: [")?;
             element_index = 0;
@@ -284,6 +347,7 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
                     emit_element_name(collector, element)?;
                     element_index += 1;
                 }
+                // Add padding zeros
                 for _ in group.len()..simd_widths[j] {
                     collector.write_all(b", 0.0")?;
                 }
@@ -291,6 +355,8 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
             collector.write_all(b"] }\n")?;
             emit_indentation(collector, indentation + 1)?;
             collector.write_all(b"}\n")?;
+
+            // Generate from_groups constructor
             emit_indentation(collector, indentation + 1)?;
             collector.write_all(b"pub const fn from_groups(")?;
             for (j, group) in class.grouped_basis.iter().enumerate() {
@@ -312,7 +378,10 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
             collector.write_all(b" } }\n")?;
             emit_indentation(collector, indentation + 1)?;
             collector.write_all(b"}\n")?;
+
+            // Generate accessor methods for each group
             for (j, group) in class.grouped_basis.iter().enumerate() {
+                // Immutable accessor
                 emit_indentation(collector, indentation + 1)?;
                 collector.write_all(b"#[inline(always)]\n")?;
                 emit_indentation(collector, indentation + 1)?;
@@ -323,6 +392,8 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
                 collector.write_fmt(format_args!("unsafe {{ self.groups.g{} }}\n", j))?;
                 emit_indentation(collector, indentation + 1)?;
                 collector.write_all(b"}\n")?;
+
+                // Mutable accessor
                 emit_indentation(collector, indentation + 1)?;
                 collector.write_all(b"#[inline(always)]\n")?;
                 emit_indentation(collector, indentation + 1)?;
@@ -336,6 +407,8 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
             }
             emit_indentation(collector, indentation)?;
             collector.write_all(b"}\n\n")?;
+
+            // Generate index remapping array for accessing elements by index
             emit_indentation(collector, indentation)?;
             collector.write_fmt(format_args!(
                 "const {}_INDEX_REMAP: [usize; {}] = [",
@@ -356,6 +429,8 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
                 element_index += simd_widths[j].saturating_sub(group.len());
             }
             collector.write_all(b"];\n\n")?;
+
+            // Implement Index trait
             emit_indentation(collector, indentation)?;
             collector.write_fmt(format_args!("impl std::ops::Index<usize> for {} {{\n", class.class_name))?;
             emit_indentation(collector, indentation + 1)?;
@@ -371,6 +446,8 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
             collector.write_all(b"}\n")?;
             emit_indentation(collector, indentation)?;
             collector.write_all(b"}\n\n")?;
+
+            // Implement IndexMut trait
             emit_indentation(collector, indentation)?;
             collector.write_fmt(format_args!("impl std::ops::IndexMut<usize> for {} {{\n", class.class_name))?;
             emit_indentation(collector, indentation + 1)?;
@@ -384,6 +461,8 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
             collector.write_all(b"}\n")?;
             emit_indentation(collector, indentation)?;
             collector.write_all(b"}\n\n")?;
+
+            // Implement conversion to array
             emit_indentation(collector, indentation)?;
             collector.write_fmt(format_args!(
                 "impl std::convert::From<{}> for [f32; {}] {{\n",
@@ -404,6 +483,8 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
             collector.write_all(b"}\n")?;
             emit_indentation(collector, indentation)?;
             collector.write_all(b"}\n\n")?;
+
+            // Implement conversion from array
             emit_indentation(collector, indentation)?;
             collector.write_fmt(format_args!(
                 "impl std::convert::From<[f32; {}]> for {} {{\n",
@@ -422,6 +503,7 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
                     collector.write_fmt(format_args!("array[{}]", element_index))?;
                     element_index += 1;
                 }
+                // Add padding zeros
                 for _ in group.len()..simd_widths[j] {
                     collector.write_all(b", 0.0")?;
                 }
@@ -431,6 +513,8 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
             collector.write_all(b"}\n")?;
             emit_indentation(collector, indentation)?;
             collector.write_all(b"}\n\n")?;
+
+            // Implement Debug trait for nicer formatting
             emit_indentation(collector, indentation)?;
             collector.write_fmt(format_args!("impl std::fmt::Debug for {} {{\n", class.class_name))?;
             emit_indentation(collector, indentation + 1)?;
@@ -454,11 +538,15 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
             emit_indentation(collector, indentation)?;
             collector.write_all(b"}\n\n")?;
         }
+
+        // Return statement
         AstNode::ReturnStatement { expression } => {
             collector.write_all(b"return ")?;
             emit_expression(collector, expression)?;
             collector.write_all(b";\n")?;
         }
+
+        // Variable assignment
         AstNode::VariableAssignment { name, data_type, expression } => {
             if let Some(data_type) = data_type {
                 collector.write_fmt(format_args!("let mut {}", name))?;
@@ -471,6 +559,8 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
             emit_expression(collector, expression)?;
             collector.write_all(b";\n")?;
         }
+
+        // Control flow statements
         AstNode::IfThenBlock { condition, body } | AstNode::WhileLoopBlock { condition, body } => {
             collector.write_all(match &ast_node {
                 AstNode::IfThenBlock { .. } => b"if ",
@@ -486,7 +576,10 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
             emit_indentation(collector, indentation)?;
             collector.write_all(b"}\n")?;
         }
+
+        // Trait implementation (for operator overloading, conversion, etc.)
         AstNode::TraitImplementation { result, parameters, body } => {
+            // Skip purely scalar implementations with no multi-vector involvement
             if result.data_type.is_scalar()
                 && !parameters
                     .iter()
@@ -494,7 +587,11 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
             {
                 return Ok(());
             }
+
+            // Generate trait implementation header
             collector.write_fmt(format_args!("impl {}", result.name))?;
+
+            // Determine which type to implement the trait for
             let impl_for = match parameters.len() {
                 0 => &result.data_type,
                 1 if result.name == "Into" => {
@@ -516,12 +613,16 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
             collector.write_all(b" for ")?;
             emit_data_type(collector, impl_for)?;
             collector.write_all(b" {\n")?;
+
+            // Add associated Output type for operators
             if !parameters.is_empty() && result.name != "Into" {
                 emit_indentation(collector, indentation + 1)?;
                 collector.write_all(b"type Output = ")?;
                 emit_data_type(collector, &result.data_type)?;
                 collector.write_all(b";\n\n")?;
             }
+
+            // Emit function for operators
             emit_indentation(collector, indentation + 1)?;
             collector.write_all(b"fn ")?;
             camel_to_snake_case(collector, result.name)?;
@@ -553,6 +654,7 @@ pub fn emit_code<W: std::io::Write>(collector: &mut W, ast_node: &AstNode, inden
             }
             emit_indentation(collector, indentation + 1)?;
             collector.write_all(b"}\n}\n\n")?;
+            // Emit math trait impls
             match result.name {
                 "Add" | "Sub" | "Mul" | "Div" => {
                     emit_assign_trait(collector, result, parameters)?;

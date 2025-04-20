@@ -1,12 +1,16 @@
+/// Represents a geometric algebra, as defined by the squares of its generators
 pub struct GeometricAlgebra<'a> {
     pub generator_squares: &'a [isize],
 }
 
 impl<'a> GeometricAlgebra<'a> {
+    /// Number of basis blades in the algebra (2^n)
     pub fn basis_size(&self) -> usize {
         1 << self.generator_squares.len()
     }
 
+    /// Iterator over all basis blades
+    /// Uses duals to normalize the scalar values for canonical ordering.
     pub fn basis(&self) -> impl Iterator<Item = BasisElement> + '_ {
         (0..self.basis_size() as BasisElementIndex).map(move |index| {
             let mut element = BasisElement::from_index(index);
@@ -18,6 +22,7 @@ impl<'a> GeometricAlgebra<'a> {
         })
     }
 
+    /// Sorted list of all basis blades, in canonical order.
     pub fn sorted_basis(&self) -> Vec<BasisElement> {
         let mut basis_elements = self.basis().collect::<Vec<BasisElement>>();
         basis_elements.sort();
@@ -25,8 +30,10 @@ impl<'a> GeometricAlgebra<'a> {
     }
 }
 
+/// Index type for basis blades (supports up to 16 generators).
 pub type BasisElementIndex = u16;
 
+/// Represents a single basis blade with a scalar and an index (bitmask).
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct BasisElement {
     pub scalar: isize,
@@ -34,10 +41,12 @@ pub struct BasisElement {
 }
 
 impl BasisElement {
+    /// Constructs a basis element from its index with scalar 1
     pub fn from_index(index: BasisElementIndex) -> Self {
         Self { scalar: 1, index }
     }
 
+    /// Parses a basis blade from a string like "-e13"
     pub fn parse(mut name: &str, algebra: &GeometricAlgebra) -> Self {
         let mut result = Self::from_index(0);
         if name.starts_with('-') {
@@ -57,14 +66,17 @@ impl BasisElement {
         result
     }
 
+    /// Number of basis vectors in the element
     pub fn grade(&self) -> usize {
         self.index.count_ones() as usize
     }
 
+    /// Iterator over the bit indices of the basis vectors present in the element
     pub fn component_bits(&self) -> impl Iterator<Item = usize> + '_ {
         (0..std::mem::size_of::<BasisElementIndex>() * 8).filter(move |index| (self.index >> index) & 1 != 0)
     }
 
+    /// Dual of the element
     pub fn dual(&self, algebra: &GeometricAlgebra) -> Self {
         let mut result = Self {
             scalar: self.scalar,
@@ -74,6 +86,7 @@ impl BasisElement {
         result
     }
 
+    /// Geometric product
     pub fn product(a: &Self, b: &Self, algebra: &GeometricAlgebra) -> Self {
         let commutations = a.component_bits().fold((0, a.index, b.index), |(commutations, a, b), index| {
             let hurdles_a = a & (BasisElementIndex::MAX << (index + 1));
@@ -95,6 +108,7 @@ impl BasisElement {
 }
 
 impl std::fmt::Display for BasisElement {
+    /// Custom string representation for basis blades like "e12" or "-e1".
     fn fmt(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
         let name = format!("e{}", self.component_bits().map(|index| format!("{:X}", index)).collect::<String>());
         formatter.pad_integral(
@@ -112,6 +126,7 @@ impl std::fmt::Display for BasisElement {
 }
 
 impl std::cmp::Ord for BasisElement {
+    /// Basis elements are ordered by grade, then lexicographically by index.
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         let grades_order = self.grade().cmp(&other.grade());
         if grades_order != std::cmp::Ordering::Equal {
@@ -133,24 +148,28 @@ impl std::cmp::PartialOrd for BasisElement {
     }
 }
 
+/// Basis involutions (e.g. projection, involutions, duals etc)
 #[derive(Clone)]
 pub struct Involution {
     pub terms: Vec<(BasisElement, BasisElement)>,
 }
 
 impl Involution {
+    /// Identity involution: each basis maps to itself.
     pub fn identity(algebra: &GeometricAlgebra) -> Self {
         Self {
             terms: algebra.basis().map(|element| (element.clone(), element)).collect(),
         }
     }
 
+    /// Projection that retains only elements in the given multivector class.
     pub fn projection(class: &MultiVectorClass) -> Self {
         Self {
             terms: class.flat_basis().iter().map(|element| (element.clone(), element.clone())).collect(),
         }
     }
 
+    /// Applies a negation to selected grades.
     pub fn negated<F>(&self, grade_negation: F) -> Self
     where
         F: Fn(usize) -> bool,
@@ -168,12 +187,14 @@ impl Involution {
         }
     }
 
+    /// Applies dual to all target values in the involution.
     pub fn dual(&self, algebra: &GeometricAlgebra) -> Self {
         Self {
             terms: self.terms.iter().map(|(key, value)| (key.clone(), value.dual(algebra))).collect(),
         }
     }
 
+    /// Predefined involutions for geometric algebra.
     pub fn involutions(algebra: &GeometricAlgebra) -> Vec<(&'static str, Self)> {
         let involution = Self::identity(algebra);
         vec![
@@ -186,6 +207,7 @@ impl Involution {
     }
 }
 
+/// A single product term with explicit factors and result.
 #[derive(Clone, PartialEq, Eq)]
 pub struct ProductTerm {
     pub product: BasisElement,
@@ -193,12 +215,14 @@ pub struct ProductTerm {
     pub factor_b: BasisElement,
 }
 
+/// Represents the full product table between two multivectors.
 #[derive(Clone)]
 pub struct Product {
     pub terms: Vec<ProductTerm>,
 }
 
 impl Product {
+    /// Constructs the full bilinear product between all elements of `a` and `b`.
     pub fn new(a: &[BasisElement], b: &[BasisElement], algebra: &GeometricAlgebra) -> Self {
         Self {
             terms: a
@@ -215,6 +239,7 @@ impl Product {
         }
     }
 
+    /// Filters product terms based on a projection function of grades.
     pub fn projected<F>(&self, grade_projection: F) -> Self
     where
         F: Fn(usize, usize, usize) -> bool,
@@ -229,6 +254,7 @@ impl Product {
         }
     }
 
+    /// Dualizes each term in the product.
     pub fn dual(&self, algebra: &GeometricAlgebra) -> Self {
         Self {
             terms: self
@@ -243,6 +269,7 @@ impl Product {
         }
     }
 
+    /// Computes all standard products from the full geometric product.
     pub fn products(algebra: &GeometricAlgebra) -> Vec<(&'static str, Self)> {
         let basis = algebra.basis().collect::<Vec<_>>();
         let product = Self::new(&basis, &basis, algebra);
@@ -258,6 +285,7 @@ impl Product {
     }
 }
 
+/// Registry to deduplicate and retrieve multivector classes by signature.
 #[derive(Default)]
 pub struct MultiVectorClassRegistry {
     pub classes: Vec<MultiVectorClass>,
@@ -265,16 +293,19 @@ pub struct MultiVectorClassRegistry {
 }
 
 impl MultiVectorClassRegistry {
+    /// Add class to registry
     pub fn register(&mut self, class: MultiVectorClass) {
         self.index_by_signature.insert(class.signature(), self.classes.len());
         self.classes.push(class);
     }
 
+    /// Get class by signature
     pub fn get(&self, signature: &[BasisElementIndex]) -> Option<&MultiVectorClass> {
         self.index_by_signature.get(signature).map(|index| &self.classes[*index])
     }
 }
 
+/// A named collection of basis elements (e.g. even subalgebra, scalar, bivector, rotor etc)
 #[derive(PartialEq, Eq, Debug)]
 pub struct MultiVectorClass {
     pub class_name: String,
